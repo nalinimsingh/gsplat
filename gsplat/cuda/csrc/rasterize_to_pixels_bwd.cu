@@ -102,9 +102,6 @@ __global__ void rasterize_to_pixels_bwd_kernel(
         );                                         // [block_size]
     S *rgbs_batch = (S *)&conic_batch[block_size]; // [block_size * COLOR_DIM]
 
-    // this is the T AFTER the last gaussian in this pixel
-    S T_final = 1.0f - render_alphas[pix_id];
-    S T = T_final;
     // the contribution from gaussians behind the current one
     S buffer[COLOR_DIM] = {0.f};
     // index of last gaussian to contribute to this pixel
@@ -173,7 +170,7 @@ __global__ void rasterize_to_pixels_bwd_kernel(
                                   conic.z * delta.y * delta.y) +
                           conic.y * delta.x * delta.y;
                 vis = __expf(-sigma);
-                alpha = min(0.999f, opac * vis);
+                alpha = opac * vis;
                 if (sigma < 0.f || alpha < 1.f / 255.f) {
                     valid = false;
                 }
@@ -190,24 +187,18 @@ __global__ void rasterize_to_pixels_bwd_kernel(
             S v_opacity_local = 0.f;
             // initialize everything to 0, only set if the lane is valid
             if (valid) {
-                // compute the current T for this gaussian
-                S ra = 1.0f / (1.0f - alpha);
-                T *= ra;
                 // update v_rgb for this gaussian
-                const S fac = alpha * T;
                 GSPLAT_PRAGMA_UNROLL
                 for (uint32_t k = 0; k < COLOR_DIM; ++k) {
-                    v_rgb_local[k] = fac * v_render_c[k];
+                    v_rgb_local[k] = alpha * v_render_c[k];
                 }
                 // contribution from this pixel
                 S v_alpha = 0.f;
                 for (uint32_t k = 0; k < COLOR_DIM; ++k) {
-                    v_alpha +=
-                        (rgbs_batch[t * COLOR_DIM + k] * T - buffer[k] * ra) *
-                        v_render_c[k];
+                    v_alpha += (rgbs_batch[t * COLOR_DIM + k]) * v_render_c[k];
                 }
 
-                v_alpha += T_final * ra * v_render_a;
+                v_alpha += v_render_a;
                 // contribution from background pixel
                 if (backgrounds != nullptr) {
                     S accum = 0.f;
@@ -215,29 +206,27 @@ __global__ void rasterize_to_pixels_bwd_kernel(
                     for (uint32_t k = 0; k < COLOR_DIM; ++k) {
                         accum += backgrounds[k] * v_render_c[k];
                     }
-                    v_alpha += -T_final * ra * accum;
+                    v_alpha += - accum;
                 }
 
-                if (opac * vis <= 0.999f) {
-                    const S v_sigma = -opac * vis * v_alpha;
-                    v_conic_local = {
-                        0.5f * v_sigma * delta.x * delta.x,
-                        v_sigma * delta.x * delta.y,
-                        0.5f * v_sigma * delta.y * delta.y
-                    };
-                    v_xy_local = {
-                        v_sigma * (conic.x * delta.x + conic.y * delta.y),
-                        v_sigma * (conic.y * delta.x + conic.z * delta.y)
-                    };
-                    if (v_means2d_abs != nullptr) {
-                        v_xy_abs_local = {abs(v_xy_local.x), abs(v_xy_local.y)};
-                    }
-                    v_opacity_local = vis * v_alpha;
+                const S v_sigma = -opac * vis * v_alpha;
+                v_conic_local = {
+                    0.5f * v_sigma * delta.x * delta.x,
+                    v_sigma * delta.x * delta.y,
+                    0.5f * v_sigma * delta.y * delta.y
+                };
+                v_xy_local = {
+                    v_sigma * (conic.x * delta.x + conic.y * delta.y),
+                    v_sigma * (conic.y * delta.x + conic.z * delta.y)
+                };
+                if (v_means2d_abs != nullptr) {
+                    v_xy_abs_local = {abs(v_xy_local.x), abs(v_xy_local.y)};
                 }
+                v_opacity_local = vis * v_alpha;
 
                 GSPLAT_PRAGMA_UNROLL
                 for (uint32_t k = 0; k < COLOR_DIM; ++k) {
-                    buffer[k] += rgbs_batch[t * COLOR_DIM + k] * fac;
+                    buffer[k] += rgbs_batch[t * COLOR_DIM + k] * alpha;
                 }
             }
             warpSum<COLOR_DIM, S>(v_rgb_local, warp);
